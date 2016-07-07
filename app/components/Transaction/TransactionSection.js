@@ -26,7 +26,6 @@ export default class TransactionSection extends Component {
   }
 
   handlePost(password) {
-    console.log(password);
     if (!password) {
       this.props.updateError('Password Required');
     } else {
@@ -84,7 +83,6 @@ export default class TransactionSection extends Component {
         <TransactionDetail
           updateCRAccount={ updateCRAccount }
           transactionAmount={ transactionAmount }/>
-        <AddTransactionBtn handleClick={ this.handleAddTransaction }/>
         {
           transaction_item.map((item, key) => (
             <TransactionItem key={ item.key } item={ item }
@@ -92,6 +90,7 @@ export default class TransactionSection extends Component {
               handleUpdateField={ that.handleUpdateField.bind(null, key) }/>
           ))
         }
+        <AddTransactionBtn handleClick={ this.handleAddTransaction }/>
         { this.renderActionsSection() }
         { this.renderTransactionPopup() }
       </div>

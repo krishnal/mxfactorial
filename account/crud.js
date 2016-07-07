@@ -25,70 +25,87 @@
 
 'use strict';
 
-var express = require('express');
-var bodyParser = require('body-parser');
-var config = require('../config');
-var gcloud = require('gcloud');
-var CryptoJS = require("crypto-js");
-var jwt = require('jsonwebtoken');
-var passport = require('passport');
-var JwtStrategy = require('passport-jwt').Strategy;
-var ExtractJwt = require('passport-jwt').ExtractJwt;
 var _ = require('lodash');
-
-// [START config]
-var datastore = gcloud.datastore({
-  projectId: config.get('GCLOUD_PROJECT')
-});
-
-
-var accountAuthKey = datastore.key([
-  'AccountAuth'
-]);
-var accountProfileKey = datastore.key([
-  'AccountProfile'
-]);
-
-
+var express = require('express');
+var CryptoJS = require('crypto-js');
+var jwt = require('jsonwebtoken');
 var router = express.Router();
+var validator = require('validator');
+var passport = require('passport');
 
-// Automatically parse request body as form data
-router.use(bodyParser.urlencoded({ extended: false }));
+var config = require('config.js');
+var firebaseClient = require('firebase-client/index');
+var USER_PATH = '/account';
+var PROFILE_FIELDS = [
+  'first_name',
+  'middle_name',
+  'last_name',
+  'date_of_birth',
+  'email_address',
+  'street_number',
+  'street_name',
+  'unit_number',
+  'floor_number',
+  'city',
+  'county',
+  'district',
+  'state',
+  'region',
+  'province',
+  'territory',
+  'postal_code',
+  'country',
+  'user_home_latlng',
+  'telephone_country_code',
+  'telephone_area_code',
+  'telephone_number',
+  'occupation',
+  'industry'
+];
 
-var getAccountByAccountName = function (accountName, cb) {
-  var query = datastore.createQuery('AccountAuth')
-    .filter('account', '=', accountName);
-
-  datastore.runQuery(query, cb);
+var getAccountByAccountName = function (accountName) {
+  return firebaseClient().then(function (instance) {
+    return instance.get(USER_PATH + '/' + accountName);
+  });
 };
 
-var getAllAccounts = function (cb) {
-  var query = datastore.createQuery('AccountAuth');
-  datastore.runQuery(query, cb);
-}
+router.post('/auth', function (req, res, next) {
+  getAccountByAccountName(req.body.username)
+    .then(function (response) {
+      var data = response.data;
 
+      if (data) {
+        var payload = data;
+        if (String(CryptoJS.MD5(req.body.password)) == payload.password) {
+          delete payload.password;
 
-router.post('/authenticate', function list(req, res, next) {
-  getAccountByAccountName(req.body.username, function (err, data) {
-    if (err) {
-      res.status(500).json(err);
-    } else {
-      if (data && data[0] && data[0].data) {
-        var payload = data[0].data;
-        var token = jwt.sign(payload, config.get('API_SECRET'), {
-          expiresIn: config.get('TOKEN_EXPIRE_TIME')
-        });
-        if (String(CryptoJS.MD5(req.body.password)) == payload.password_create) {
-          delete payload.password_create;
-          res.status(200).json({ user: payload, token: "JWT " + token });
-        }else{
-          res.status(500).json({error: "Incorrect passowrd"});
+          var token = jwt.sign({ username: payload.account }, config.get('API_SECRET'), {
+            expiresIn: config.get('TOKEN_EXPIRE_TIME')
+          });
+
+          res.status(200).json({
+            user: payload,
+            token: 'JWT ' + token
+          });
+        } else {
+          res.status(400).json({ error: 'Incorrect password' });
         }
-
       } else {
-        res.status(500).json({ error: "user not found" });
+        res.status(400).json({ error: 'User not found' });
       }
-    }
+    }).catch(function (err) {
+      res.status(500).json(err);
+    });
+});
+
+router.get('/auth', passport.authenticate('jwt', { session: false }), function (req, res) {
+  getAccountByAccountName(req.user.username).then(function (response) {
+    delete response.data.password;
+    res.status(200).json({
+      user: response.data
+    });
+  }).catch(function (err) {
+    res.status(500).json(err);
   });
 });
 
@@ -132,72 +149,160 @@ router.post('/authenticate', function list(req, res, next) {
  * @apiUse AccountExistError
  */
 
+
+var putAccount = function (auth) {
+  return firebaseClient().then(function (instance) {
+    return instance.put(USER_PATH + '/' + auth.account, auth);
+  });
+};
+
 router.post('/', function (req, res) {
   var body = req.body;
   if (!body.account || !body.password) {
-    res.status(400).json({ error: "account name and password cannot be empty" });
+    res.status(400).json({ error: 'account name and password cannot be empty' });
     return;
   }
-  var auth = ['account','password'];
-  var profile = ['first_name',
-                  'middle_name',
-                  'last_name',
-                  'date_of_birth',
-                  'email_address',
-                  'street_number',
-                  'street_name',
-                  'unit_number',
-                  'floor_number',
-                  'city',
-                  'county',
-                  'district',
-                  'state',
-                  'region',
-                  'province',
-                  'territory',
-                  'postal_code',
-                  'country',
-                  'user_home_latlng',
-                  'telephone_country_code',
-                  'telephone_area_code',
-                  'telephone_number',
-                  'occupation',
-                  'industry',
-                  'created_time'
-                ];
+  var auth = ['account', 'password'];
   var authParams = _.pick(body, auth);
-  var profileParams = _.pick(body,profile);
+  var profileParams = _.pick(body, PROFILE_FIELDS);
   profileParams.created_time = new Date();
   authParams.password = String(CryptoJS.MD5(authParams.password));
+  var account_profile = _.isEmpty(profileParams) ? null : { account_profile: [profileParams] };
 
-  getAccountByAccountName(body.account, function (err, data) {
-    if (data && data.length > 0) {
-      res.status(400).json({ error: "Account name already registered" });
-    } else {
-      var entities = [];
-      entities.push({key: datastore.key(['AccountAuth',authParams.account]),data: authParams});
-      entities.push({key: datastore.key(['AccountAuth',authParams.account,'AccountProfile']),data:profileParams});
-
-      datastore.save(entities, function (err, data) { 
-        if (!err) {
-          res.status(200).json(data);
-        } else {
+  getAccountByAccountName(body.account)
+    .then(function (response) {
+      if (response.data) {
+        res.status(400).json({ error: 'Account name already registered' });
+      } else {
+        putAccount(_.assign(authParams, account_profile)).then(function (response) {
+          res.status(200).json({ account: response.data.account });
+        }).catch(function (err) {
           res.status(500).json(err);
-        }
-      });
-    }
+        });
+      }
+    }).catch(function (err) {
+      res.status(500).json(err);
+    });
+});
+
+var patchEmail = function (account, email) {
+  return firebaseClient().then(function (instance) {
+    return instance.patch([USER_PATH, account, 'account_profile', 0].join('/'), { email_address: email });
+  });
+};
+
+router.patch('/email', passport.authenticate('jwt', { session: false }), function (req, res) {
+  var body = req.body;
+  if (!body.account) {
+    res.status(500).json({ error: 'Account is undefined' });
+    return;
+  }
+
+  if (!body.email) {
+    res.status(500).json({ error: 'Email required' });
+    return;
+  }
+
+  if (!validator.isEmail(body.email)) {
+    res.status(500).json({ error: 'Invalid email' });
+    return;
+  }
+
+
+  patchEmail(body.account, body.email).then(function (response) {
+    res.status(200).json({ success: true });
+  }).catch(function (err) {
+    res.status(500).json(err);
   });
 });
 
-//auth test
+var patchPassword = function (account, password) {
+  return firebaseClient().then(function (instance) {
+    return instance.patch([USER_PATH, account].join('/'), { password: String(CryptoJS.MD5(password)) });
+  });
+};
 
-router.get('/authtest', passport.authenticate('jwt', { session: false }), function (req, res, next) {
-  res.status(200).json(req.user);
+router.patch('/password', passport.authenticate('jwt', { session: false }), function (req, res) {
+  var body = req.body;
+  if (!body.account) {
+    res.status(500).json({ error: 'Account is undefined' });
+    return;
+  }
+
+  if (!body.new_password || !body.old_password) {
+    res.status(500).json({ error: 'Password required' });
+    return;
+  }
+
+  if (body.new_password.length < 8
+      || /\s/.test(body.new_password)
+      || !/([A-Z]|[a-z])+[0-9]+[~@#$^*()_+=[\]{}|\\,.?:-]*/g.test(body.new_password)) {
+    res.status(500).json({
+      error: [
+        'Password must be 8 characters,',
+        'both numbers and letters,',
+        'special characters permitted,',
+        'spaces not permitted'].join(' ')
+    });
+    return;
+  }
+
+  getAccountByAccountName(body.account)
+    .then(function (response) {
+      if (response.data && response.data.password === String(CryptoJS.MD5(body.old_password))) {
+        patchPassword(body.account, body.new_password).then(function (response) {
+          res.status(200).json({ success: true });
+        }).catch(function (err) {
+          res.status(500).json(err);
+        });
+      } else {
+        res.status(400).json({ error: 'Old password incorrect' });
+      }
+    }).catch(function (err) {
+      res.status(500).json(err);
+    });
 });
 
-router.get('/', function (req, res) {
-  getAllAccounts(function (err, data) {
-    res.status(200).json(data);
+var putProfile = function (account, profile) {
+  return firebaseClient().then(function (instance) {
+    return instance.put([USER_PATH, account, 'account_profile'].join('/'), profile);
+  });
+};
+
+router.patch('/profile', passport.authenticate('jwt', { session: false }), function (req, res) {
+  var account = req.body.account;
+  var password = req.body.password;
+  var profile = req.body.profile;
+
+  if (!account) {
+    res.status(500).json({ error: 'Account is undefined' });
+    return;
+  }
+
+  if (!password) {
+    res.status(500).json({ error: 'Password required' });
+    return;
+  }
+
+  profile = _.pick(profile, PROFILE_FIELDS);
+  profile.created_time = new Date();
+
+  getAccountByAccountName(account).then(function (response) {
+    if (response.data.password === String(CryptoJS.MD5(password))) {
+      if (response.data.account_profile) {
+        profile.email_address = response.data.account_profile[0].email_address;
+        profile = [profile].concat(response.data.account_profile);
+      } else {
+        profile = [profile];
+      }
+      return putProfile(account, profile);
+    } else {
+      res.status(400).json({ error: 'Password incorrect' });
+    }
+  }).then(function (response) {
+    res.status(200).json({ success: true });
+  }).catch(function (err) {
+    res.status(500).json(err);
   });
 });
 
